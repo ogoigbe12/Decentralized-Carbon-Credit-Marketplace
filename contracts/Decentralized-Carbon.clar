@@ -1,33 +1,3 @@
-
-;; title: Decentralized-Carbon
-;; version:
-;; summary:
-;; description:
-
-;; traits
-;;
-
-;; token definitions
-;;
-
-;; constants
-;;
-
-;; data vars
-;;
-
-;; data maps
-;;
-
-;; public functions
-;;
-
-;; read only functions
-;;
-
-;; private functions
-;;
-
 (define-constant contract-owner tx-sender)
 (define-constant err-owner-only (err u100))
 (define-constant err-not-found (err u101))
@@ -42,6 +12,11 @@
 (define-data-var next-credit-id uint u1)
 (define-data-var next-project-id uint u1)
 (define-data-var platform-fee-rate uint u250)
+
+(define-constant err-not-staked (err u109))
+(define-constant err-staking-period-not-ended (err u110))
+(define-constant err-already-staked (err u111))
+(define-constant stake-reward-rate u500)
 
 (define-map carbon-credits
   { credit-id: uint }
@@ -388,4 +363,91 @@
 
 (define-read-only (get-next-project-id)
   (var-get next-project-id)
+)
+
+
+
+(define-map staked-credits
+  { user: principal, stake-id: uint }
+  {
+    credit-id: uint,
+    amount: uint,
+    staked-at: uint,
+    stake-duration: uint,
+    reward-rate: uint,
+    active: bool
+  }
+)
+
+(define-data-var next-stake-id uint u1)
+
+(define-public (stake-carbon-credits (credit-id uint) (amount uint) (duration-blocks uint))
+  (let
+    (
+      (credit (unwrap! (map-get? carbon-credits { credit-id: credit-id }) err-not-found))
+      (user-balance (default-to { balance: u0 } (map-get? user-balances { user: tx-sender })))
+      (stake-id (var-get next-stake-id))
+    )
+    (asserts! (is-eq tx-sender (get owner credit)) err-unauthorized)
+    (asserts! (not (get retired credit)) err-invalid-amount)
+    (asserts! (>= (get balance user-balance) amount) err-insufficient-balance)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (>= duration-blocks u1000) err-invalid-amount)
+    
+    (map-set user-balances
+      { user: tx-sender }
+      { balance: (- (get balance user-balance) amount) }
+    )
+    
+    (map-set staked-credits
+      { user: tx-sender, stake-id: stake-id }
+      {
+        credit-id: credit-id,
+        amount: amount,
+        staked-at: stacks-block-height,
+        stake-duration: duration-blocks,
+        reward-rate: stake-reward-rate,
+        active: true
+      }
+    )
+    
+    (var-set next-stake-id (+ stake-id u1))
+    (ok stake-id)
+  )
+)
+
+(define-public (unstake-carbon-credits (stake-id uint))
+  (let
+    (
+      (stake (unwrap! (map-get? staked-credits { user: tx-sender, stake-id: stake-id }) err-not-staked))
+      (user-balance (default-to { balance: u0 } (map-get? user-balances { user: tx-sender })))
+      (staking-end-block (+ (get staked-at stake) (get stake-duration stake)))
+      (reward-amount (/ (* (get amount stake) (get reward-rate stake)) u10000))
+    )
+    (asserts! (get active stake) err-not-staked)
+    (asserts! (>= stacks-block-height staking-end-block) err-staking-period-not-ended)
+    
+    (map-set user-balances
+      { user: tx-sender }
+      { balance: (+ (get balance user-balance) (get amount stake) reward-amount) }
+    )
+    
+    (map-set staked-credits
+      { user: tx-sender, stake-id: stake-id }
+      (merge stake { active: false })
+    )
+    
+    (ok { original-amount: (get amount stake), reward-amount: reward-amount })
+  )
+)
+
+(define-read-only (get-stake-info (user principal) (stake-id uint))
+  (map-get? staked-credits { user: user, stake-id: stake-id })
+)
+
+(define-read-only (calculate-stake-reward (user principal) (stake-id uint))
+  (match (map-get? staked-credits { user: user, stake-id: stake-id })
+    stake (/ (* (get amount stake) (get reward-rate stake)) u10000)
+    u0
+  )
 )
