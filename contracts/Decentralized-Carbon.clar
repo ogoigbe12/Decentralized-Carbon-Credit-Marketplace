@@ -451,3 +451,97 @@
     u0
   )
 )
+
+(define-map escrow-agreements
+  { escrow-id: uint }
+  {
+    buyer: principal,
+    seller: principal,
+    credit-id: uint,
+    amount: uint,
+    stx-amount: uint,
+    created-at: uint,
+    expires-at: uint,
+    status: (string-ascii 16),
+    requires-verification: bool,
+    arbitrator: (optional principal)
+  }
+)
+
+(define-map escrow-funds
+  { escrow-id: uint }
+  { stx-held: uint, credits-held: uint }
+)
+
+(define-data-var next-escrow-id uint u1)
+(define-constant escrow-duration-blocks u1440)
+
+(define-public (create-escrow (seller principal) (credit-id uint) (amount uint) (stx-amount uint) (requires-verification bool) (arbitrator (optional principal)))
+  (let
+    (
+      (escrow-id (var-get next-escrow-id))
+      (credit (unwrap! (map-get? carbon-credits { credit-id: credit-id }) err-not-found))
+      (seller-balance (default-to { balance: u0 } (map-get? user-balances { user: seller })))
+    )
+    (asserts! (>= (get balance seller-balance) amount) err-insufficient-balance)
+    (asserts! (> stx-amount u0) err-invalid-amount)
+    (asserts! (> amount u0) err-invalid-amount)
+    
+    (try! (stx-transfer? stx-amount tx-sender (as-contract tx-sender)))
+    
+    (map-set user-balances
+      { user: seller }
+      { balance: (- (get balance seller-balance) amount) }
+    )
+    
+    (map-set escrow-agreements
+      { escrow-id: escrow-id }
+      {
+        buyer: tx-sender,
+        seller: seller,
+        credit-id: credit-id,
+        amount: amount,
+        stx-amount: stx-amount,
+        created-at: stacks-block-height,
+        expires-at: (+ stacks-block-height escrow-duration-blocks),
+        status: "active",
+        requires-verification: requires-verification,
+        arbitrator: arbitrator
+      }
+    )
+    
+    (map-set escrow-funds
+      { escrow-id: escrow-id }
+      { stx-held: stx-amount, credits-held: amount }
+    )
+    
+    (var-set next-escrow-id (+ escrow-id u1))
+    (ok escrow-id)
+  )
+)
+
+(define-public (release-escrow (escrow-id uint))
+  (let
+    (
+      (agreement (unwrap! (map-get? escrow-agreements { escrow-id: escrow-id }) err-not-found))
+      (funds (unwrap! (map-get? escrow-funds { escrow-id: escrow-id }) err-not-found))
+      (buyer-balance (default-to { balance: u0 } (map-get? user-balances { user: (get buyer agreement) })))
+    )
+    (asserts! (is-eq (get status agreement) "active") err-invalid-amount)
+    (asserts! (or (is-eq tx-sender (get buyer agreement)) (is-eq tx-sender (get seller agreement))) err-unauthorized)
+    
+    (try! (as-contract (stx-transfer? (get stx-held funds) tx-sender (get seller agreement))))
+    
+    (map-set user-balances
+      { user: (get buyer agreement) }
+      { balance: (+ (get balance buyer-balance) (get credits-held funds)) }
+    )
+    
+    (map-set escrow-agreements
+      { escrow-id: escrow-id }
+      (merge agreement { status: "completed" })
+    )
+    
+    (ok true)
+  )
+)
