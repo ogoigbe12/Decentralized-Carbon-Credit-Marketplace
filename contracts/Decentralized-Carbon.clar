@@ -545,3 +545,84 @@
     (ok true)
   )
 )
+
+(define-map credit-audit-trail
+  { credit-id: uint, event-id: uint }
+  {
+    event-type: (string-ascii 16),
+    from-user: (optional principal),
+    to-user: (optional principal),
+    amount: uint,
+    price-per-ton: (optional uint),
+    stx-amount: (optional uint),
+    block-height: uint,
+    transaction-memo: (string-ascii 128),
+    verified-by: (optional principal)
+  }
+)
+
+(define-map credit-event-counters
+  { credit-id: uint }
+  { total-events: uint }
+)
+
+(define-private (log-credit-event (credit-id uint) (event-type (string-ascii 16)) (from-user (optional principal)) (to-user (optional principal)) (amount uint) (price-per-ton (optional uint)) (stx-amount (optional uint)) (memo (string-ascii 128)) (verifier (optional principal)))
+  (let
+    (
+      (event-counter (default-to { total-events: u0 } (map-get? credit-event-counters { credit-id: credit-id })))
+      (event-id (get total-events event-counter))
+    )
+    (map-set credit-audit-trail
+      { credit-id: credit-id, event-id: event-id }
+      {
+        event-type: event-type,
+        from-user: from-user,
+        to-user: to-user,
+        amount: amount,
+        price-per-ton: price-per-ton,
+        stx-amount: stx-amount,
+        block-height: stacks-block-height,
+        transaction-memo: memo,
+        verified-by: verifier
+      }
+    )
+    (map-set credit-event-counters
+      { credit-id: credit-id }
+      { total-events: (+ event-id u1) }
+    )
+    (ok true)
+  )
+)
+
+(define-public (log-credit-issuance (credit-id uint) (issuer principal) (amount uint) (memo (string-ascii 128)))
+  (log-credit-event credit-id "issuance" none (some issuer) amount none none memo (some tx-sender))
+)
+
+(define-public (log-credit-transfer (credit-id uint) (from-user principal) (to-user principal) (amount uint) (memo (string-ascii 128)))
+  (log-credit-event credit-id "transfer" (some from-user) (some to-user) amount none none memo none)
+)
+
+(define-public (log-credit-sale (credit-id uint) (seller principal) (buyer principal) (amount uint) (price-per-ton uint) (stx-amount uint) (memo (string-ascii 128)))
+  (log-credit-event credit-id "sale" (some seller) (some buyer) amount (some price-per-ton) (some stx-amount) memo none)
+)
+
+(define-public (log-credit-retirement (credit-id uint) (owner principal) (amount uint) (memo (string-ascii 128)))
+  (log-credit-event credit-id "retirement" (some owner) none amount none none memo none)
+)
+
+(define-read-only (get-credit-audit-event (credit-id uint) (event-id uint))
+  (map-get? credit-audit-trail { credit-id: credit-id, event-id: event-id })
+)
+
+(define-read-only (get-credit-event-count (credit-id uint))
+  (default-to { total-events: u0 } (map-get? credit-event-counters { credit-id: credit-id }))
+)
+
+(define-read-only (get-credit-full-history (credit-id uint))
+  (let
+    (
+      (event-count (get total-events (get-credit-event-count credit-id)))
+    )
+    (map get-credit-audit-event (list credit-id credit-id credit-id credit-id credit-id) (list u0 u1 u2 u3 u4))
+  )
+)
