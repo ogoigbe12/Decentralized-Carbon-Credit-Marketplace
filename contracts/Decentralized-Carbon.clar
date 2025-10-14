@@ -626,3 +626,112 @@
     (map get-credit-audit-event (list credit-id credit-id credit-id credit-id credit-id) (list u0 u1 u2 u3 u4))
   )
 )
+
+
+(define-map batch-trades
+  { batch-id: uint }
+  {
+    buyer: principal,
+    total-stx-spent: uint,
+    total-credits-acquired: uint,
+    items-count: uint,
+    executed-at: uint,
+    status: (string-ascii 16)
+  }
+)
+
+(define-map batch-trade-items
+  { batch-id: uint, item-index: uint }
+  {
+    credit-id: uint,
+    seller: principal,
+    amount: uint,
+    price-per-ton: uint,
+    stx-paid: uint
+  }
+)
+
+(define-data-var next-batch-id uint u1)
+
+(define-public (batch-purchase-credits (trades (list 10 { credit-id: uint, amount: uint })))
+  (let
+    (
+      (batch-id (var-get next-batch-id))
+      (result (fold process-batch-trade-item trades { index: u0, total-stx: u0, total-credits: u0, success: true }))
+    )
+    (asserts! (get success result) err-invalid-amount)
+    (asserts! (> (get total-credits result) u0) err-invalid-amount)
+    
+    (map-set batch-trades
+      { batch-id: batch-id }
+      {
+        buyer: tx-sender,
+        total-stx-spent: (get total-stx result),
+        total-credits-acquired: (get total-credits result),
+        items-count: (get index result),
+        executed-at: stacks-block-height,
+        status: "completed"
+      }
+    )
+    
+    (var-set next-batch-id (+ batch-id u1))
+    (ok { batch-id: batch-id, items-processed: (get index result), total-credits: (get total-credits result) })
+  )
+)
+
+(define-private (process-batch-trade-item 
+  (trade-item { credit-id: uint, amount: uint })
+  (accumulator { index: uint, total-stx: uint, total-credits: uint, success: bool })
+)
+  (if (not (get success accumulator))
+    accumulator
+    (match (execute-single-batch-trade (get credit-id trade-item) (get amount trade-item) (get index accumulator))
+      trade-result (merge accumulator { 
+        index: (+ (get index accumulator) u1),
+        total-stx: (+ (get total-stx accumulator) (get stx-cost trade-result)),
+        total-credits: (+ (get total-credits accumulator) (get amount trade-item)),
+        success: true 
+      })
+      error-val (merge accumulator { success: false })
+    )
+  )
+)
+
+(define-private (execute-single-batch-trade (credit-id uint) (amount uint) (item-index uint))
+  (let
+    (
+      (listing (unwrap! (map-get? marketplace-listings { credit-id: credit-id }) err-not-found))
+      (credit (unwrap! (map-get? carbon-credits { credit-id: credit-id }) err-not-found))
+      (seller-balance (default-to { balance: u0 } (map-get? user-balances { user: (get seller listing) })))
+      (buyer-balance (default-to { balance: u0 } (map-get? user-balances { user: tx-sender })))
+      (total-cost (* amount (get price-per-ton listing)))
+    )
+    (asserts! (get active listing) err-not-found)
+    (asserts! (not (get retired credit)) err-invalid-amount)
+    (asserts! (>= (get amount-available listing) amount) err-insufficient-balance)
+    (asserts! (> amount u0) err-invalid-amount)
+    
+    (unwrap! (stx-transfer? total-cost tx-sender (get seller listing)) err-insufficient-balance)
+    
+    (map-set user-balances { user: (get seller listing) } { balance: (- (get balance seller-balance) amount) })
+    (map-set user-balances { user: tx-sender } { balance: (+ (get balance buyer-balance) amount) })
+    
+    (map-set marketplace-listings
+      { credit-id: credit-id }
+      (merge listing { 
+        amount-available: (- (get amount-available listing) amount),
+        active: (> (- (get amount-available listing) amount) u0)
+      })
+    )
+    
+    (ok { stx-cost: total-cost, seller: (get seller listing) })
+  )
+)
+
+(define-read-only (get-batch-trade (batch-id uint))
+  (map-get? batch-trades { batch-id: batch-id })
+)
+
+(define-read-only (get-batch-trade-item (batch-id uint) (item-index uint))
+  (map-get? batch-trade-items { batch-id: batch-id, item-index: item-index })
+)
