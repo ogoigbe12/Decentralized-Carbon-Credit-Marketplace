@@ -18,6 +18,12 @@
 (define-constant err-already-staked (err u111))
 (define-constant stake-reward-rate u500)
 
+(define-constant err-standard-exists (err u112))
+(define-constant err-not-certified (err u113))
+(define-constant err-certification-expired (err u114))
+
+(define-data-var next-standard-id uint u1)
+
 (define-map carbon-credits
   { credit-id: uint }
   {
@@ -734,4 +740,128 @@
 
 (define-read-only (get-batch-trade-item (batch-id uint) (item-index uint))
   (map-get? batch-trade-items { batch-id: batch-id, item-index: item-index })
+)
+
+(define-map compliance-standards
+  { standard-id: uint }
+  {
+    name: (string-ascii 32),
+    issuing-body: (string-ascii 64),
+    framework-version: (string-ascii 16),
+    registered-by: principal,
+    registered-at: uint,
+    active: bool
+  }
+)
+
+(define-map project-certifications
+  { project-id: uint, standard-id: uint }
+  {
+    certified-at: uint,
+    expires-at: uint,
+    certification-number: (string-ascii 64),
+    auditor: principal,
+    compliance-score: uint,
+    active: bool
+  }
+)
+
+(define-map credit-compliance
+  { credit-id: uint, standard-id: uint }
+  {
+    compliant: bool,
+    verified-at: uint,
+    compliance-hash: (buff 32)
+  }
+)
+
+(define-public (register-compliance-standard (name (string-ascii 32)) (issuing-body (string-ascii 64)) (framework-version (string-ascii 16)))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (let ((standard-id (var-get next-standard-id)))
+      (map-set compliance-standards
+        { standard-id: standard-id }
+        {
+          name: name,
+          issuing-body: issuing-body,
+          framework-version: framework-version,
+          registered-by: tx-sender,
+          registered-at: stacks-block-height,
+          active: true
+        }
+      )
+      (var-set next-standard-id (+ standard-id u1))
+      (ok standard-id)
+    )
+  )
+)
+
+(define-public (certify-project (project-id uint) (standard-id uint) (certification-number (string-ascii 64)) (expires-at uint) (compliance-score uint))
+  (let
+    (
+      (project (unwrap! (map-get? carbon-projects { project-id: project-id }) err-not-found))
+      (standard (unwrap! (map-get? compliance-standards { standard-id: standard-id }) err-not-found))
+      (verifier-auth (default-to { authorized: false } (map-get? authorized-verifiers { verifier: tx-sender })))
+    )
+    (asserts! (get authorized verifier-auth) err-unauthorized)
+    (asserts! (get active standard) err-not-found)
+    (asserts! (> expires-at stacks-block-height) err-invalid-amount)
+    (asserts! (<= compliance-score u100) err-invalid-amount)
+    (map-set project-certifications
+      { project-id: project-id, standard-id: standard-id }
+      {
+        certified-at: stacks-block-height,
+        expires-at: expires-at,
+        certification-number: certification-number,
+        auditor: tx-sender,
+        compliance-score: compliance-score,
+        active: true
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (mark-credit-compliant (credit-id uint) (standard-id uint) (compliance-hash (buff 32)))
+  (let
+    (
+      (credit (unwrap! (map-get? carbon-credits { credit-id: credit-id }) err-not-found))
+      (certification (unwrap! (map-get? project-certifications { project-id: (get project-id credit), standard-id: standard-id }) err-not-certified))
+      (verifier-auth (default-to { authorized: false } (map-get? authorized-verifiers { verifier: tx-sender })))
+    )
+    (asserts! (get authorized verifier-auth) err-unauthorized)
+    (asserts! (get active certification) err-not-certified)
+    (asserts! (< stacks-block-height (get expires-at certification)) err-certification-expired)
+    (map-set credit-compliance
+      { credit-id: credit-id, standard-id: standard-id }
+      {
+        compliant: true,
+        verified-at: stacks-block-height,
+        compliance-hash: compliance-hash
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-compliance-standard (standard-id uint))
+  (map-get? compliance-standards { standard-id: standard-id })
+)
+
+(define-read-only (get-project-certification (project-id uint) (standard-id uint))
+  (map-get? project-certifications { project-id: project-id, standard-id: standard-id })
+)
+
+(define-read-only (is-credit-compliant (credit-id uint) (standard-id uint))
+  (match (map-get? credit-compliance { credit-id: credit-id, standard-id: standard-id })
+    compliance-record (get compliant compliance-record)
+    false
+  )
+)
+
+(define-read-only (verify-project-certification-valid (project-id uint) (standard-id uint))
+  (match (map-get? project-certifications { project-id: project-id, standard-id: standard-id })
+    cert (and (get active cert) (< stacks-block-height (get expires-at cert)))
+    false
+  )
 )
